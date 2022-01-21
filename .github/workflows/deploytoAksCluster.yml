@@ -1,0 +1,65 @@
+on: [push]
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@master
+    
+    - uses: azure/docker-login@v1
+      with:
+        login-server: env2acr.azurecr.io
+        username: ${{ secrets.acr_env2acr_username }}
+        password: ${{ secrets.acr_env2acr_password }}
+    
+    - name: Build and push image to ACR
+      id: build-image
+      run: |
+        docker build "$GITHUB_WORKSPACE/deploy/kubernetes" -f  "deploy/kubernetes/Dockerfile" -t env2acr.azurecr.io/env2aks:${{ github.sha }} --label dockerfile-path=deploy/kubernetes/Dockerfile
+        docker push env2acr.azurecr.io/env2aks:${{ github.sha }}
+    
+    - uses: azure/k8s-set-context@v1
+      with:
+         kubeconfig: ${{ secrets.aks_env2aks_kubeConfig }}
+      id: login
+    
+    - name: Create namespace
+      run: |
+        namespacePresent=`kubectl get namespace | grep env2aksb90a | wc -l`
+        if [ $namespacePresent -eq 0 ]
+        then
+            echo `kubectl create namespace env2aksb90a`
+        fi
+
+    - uses: azure/k8s-create-secret@v1
+      with:
+        namespace: env2aksb90a
+        container-registry-url: env2acr.azurecr.io
+        container-registry-username: ${{ secrets.acr_env2acr_username }}
+        container-registry-password: ${{ secrets.acr_env2acr_password }}
+        secret-name: env2aksdockerauth
+       
+    - uses: azure/k8s-bake@v1
+      with:
+        renderEngine: 'helm'
+        helmChart: deploy/kubernetes/helm-chart
+        releaseName: 'aks-helm-release'
+        helm-version: 'latest' 
+        silent: 'false'
+        overrideFiles: |
+          
+        overrides: |
+          replicas:2
+          image.repository:env2acr.azurecr.io/env2aks
+          image.tag:${{ github.sha }}
+          imagePullSecrets:
+            -name:env2aksdockerauth
+      id: bake
+
+    - uses: azure/k8s-deploy@v1.2
+      with:
+        namespace: env2aksb90a
+        manifests: ${{ steps.bake.outputs.manifestsBundle }}
+        images: |
+          env2acr.azurecr.io/env2aks:${{ github.sha }}
+        imagepullsecrets: |
+          env2aksdockerauth
